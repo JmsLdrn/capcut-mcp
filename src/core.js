@@ -22,6 +22,23 @@ export const DRAFTS_DIR =
 // a draft known to contain video/text/audio layers, used to harvest templates
 const TEMPLATE_DRAFT = process.env.CAPCUT_TEMPLATE_DRAFT || '0723';
 
+// CapCut 9.3.0 on macOS names the timeline file 'draft_info.json' rather
+// than 'draft_content.json'. With the name hardcoded, listDrafts() matched
+// nothing and every other call threw "draft not found", so the server was
+// inert on that platform while looking correctly installed.
+//
+// Resolution happens ONCE per draft, in the constructor, and save() reuses
+// that exact path. The dangerous version of this bug reads one file and
+// writes the other, leaving CapCut showing stale content.
+const CONTENT_NAMES = ["draft_content.json", "draft_info.json"];
+function contentPath(dir) {
+  for (const n of CONTENT_NAMES) {
+    const p = path.join(dir, n);
+    try { if (fs.existsSync(p)) return p; } catch {}
+  }
+  return null;
+}
+
 const uid = () => crypto.randomUUID().toUpperCase();
 const clone = o => JSON.parse(JSON.stringify(o));
 const US = 1e6;
@@ -60,28 +77,45 @@ function harvest(content) {
 
 export function listDrafts() {
   let names = [];
-  try { names = fs.readdirSync(DRAFTS_DIR).filter(n => { try { return fs.statSync(path.join(DRAFTS_DIR, n)).isDirectory() && fs.existsSync(path.join(DRAFTS_DIR, n, 'draft_content.json')); } catch { return false; } }); } catch {}
+  try { names = fs.readdirSync(DRAFTS_DIR).filter(n => { try { return fs.statSync(path.join(DRAFTS_DIR, n)).isDirectory() && contentPath(path.join(DRAFTS_DIR, n)) !== null; } catch { return false; } }); } catch {}
   return names.map(name => {
     const dir = path.join(DRAFTS_DIR, name);
     let dur = null;
-    try { dur = JSON.parse(fs.readFileSync(path.join(dir, 'draft_content.json'), 'utf8')).duration / US; } catch {}
+    try { dur = JSON.parse(fs.readFileSync(contentPath(dir), 'utf8')).duration / US; } catch {}
     return { name, locked: fs.existsSync(path.join(dir, '.locked')), durationSec: dur };
   });
 }
 
 // is CapCut running? (writing while open gets clobbered by autosave)
 function capcutRunning() {
-  if (process.platform !== 'win32') return false;
-  try { return /CapCut\.exe/i.test(execSync('tasklist /FI "IMAGENAME eq CapCut.exe" /NH', { encoding: 'utf8' })); }
-  catch { return false; }
+  if (process.platform === 'win32') {
+    try { return /CapCut\.exe/i.test(execSync('tasklist /FI "IMAGENAME eq CapCut.exe" /NH', { encoding: 'utf8' })); }
+    catch { return false; }
+  }
+  // Without this branch the check returned false on anything but Windows, so
+  // on macOS the "refuses to save while CapCut is running" protection did not
+  // exist: a save with CapCut open races its autosave, and whichever writes
+  // last wins. That risks silently destroying work in the editor.
+  //
+  // pgrep -x matches the process name exactly, so it cannot be fooled by an
+  // unrelated process whose command line merely mentions CapCut -- including
+  // this MCP server itself, whose path contains "capcut-mcp" and which a
+  // substring match (`pgrep -f capcut`) would match, making the guard fire
+  // permanently and refuse every save.
+  if (process.platform === 'darwin') {
+    try { return execSync('pgrep -x CapCut || true', { encoding: 'utf8' }).trim().length > 0; }
+    catch { return false; }
+  }
+  return false;
 }
 
 export class CapCutDraft {
   constructor(name) {
     this.name = name;
     this.dir = path.join(DRAFTS_DIR, name);
-    if (!fs.existsSync(path.join(this.dir, 'draft_content.json'))) throw new Error(`draft not found: ${name} (in ${DRAFTS_DIR})`);
-    this.content = JSON.parse(fs.readFileSync(path.join(this.dir, 'draft_content.json'), 'utf8'));
+    this.contentPath = contentPath(this.dir);
+    if (!this.contentPath) throw new Error(`draft not found: ${name} (in ${DRAFTS_DIR})`);
+    this.content = JSON.parse(fs.readFileSync(this.contentPath, 'utf8'));
     this.metaPath = path.join(this.dir, 'draft_meta_info.json');
     this.meta = fs.existsSync(this.metaPath) ? JSON.parse(fs.readFileSync(this.metaPath, 'utf8')) : null;
     this._tpl = null;
@@ -91,7 +125,7 @@ export class CapCutDraft {
     let t = harvest(this.content);
     // fill any missing segment type from the template draft
     if (!t.video || !t.text || !t.audio) {
-      try { const base = JSON.parse(fs.readFileSync(path.join(DRAFTS_DIR, TEMPLATE_DRAFT, 'draft_content.json'), 'utf8')); const bt = harvest(base);
+      try { const base = JSON.parse(fs.readFileSync(contentPath(path.join(DRAFTS_DIR, TEMPLATE_DRAFT)), 'utf8')); const bt = harvest(base);
         for (const k of ['video', 'audio', 'text', 'image']) if (!t[k] && bt[k]) t[k] = bt[k];
         for (const k of Object.keys(bt.tracks)) if (!t.tracks[k]) t.tracks[k] = bt.tracks[k];
       } catch {}
@@ -146,7 +180,22 @@ export class CapCutDraft {
     const dur = opts.durUs != null ? opts.durUs : probeDur(file);
     const mat = clone(tpl.mat); mat.id = uid(); mat.path = file.replace(/\\/g, '/'); mat.material_name = path.basename(file); mat.type = type;
     if (kind !== 'audio') { const { w, h } = probeWH(file); mat.width = w; mat.height = h; }
-    mat.duration = kind === 'audio' ? probeDur(file) : (mat.duration || probeDur(file));
+    // This was:
+    //   kind === 'audio' ? probeDur(file) : (mat.duration || probeDur(file))
+    // The video branch kept the duration of whatever material the TEMPLATE
+    // was cloned from -- 14.6s here -- so every generated video material
+    // claims the source file is 14.6 seconds long. CapCut then treats any
+    // source_timerange.start beyond that as out of range and clamps it to 0,
+    // so every segment plays from the beginning of its file no matter what
+    // in-point was written. A 27-minute two-camera cut came out as both
+    // cameras replaying their opening seconds over and over.
+    //
+    // Audio never had the bug because its branch always probed. That
+    // asymmetry is what identified it: the WAVs were in sync and only the
+    // video was wrong, twice over (this and local_material_id).
+    //
+    // Always probe. The `||` saved one ffprobe call and cost correctness.
+    mat.duration = probeDur(file);
     ['local_material_id', 'origin_material_id', 'local_id', 'request_id', 'aigc_history_id', 'aigc_item_id'].forEach(k => { if (k in mat) mat[k] = ''; });
     const matKey = kind === 'audio' ? 'audios' : (kind === 'image' ? 'videos' : 'videos'); // CapCut stores images in videos[]
     this._mats(matKey).push(mat);
@@ -277,7 +326,7 @@ export class CapCutDraft {
       if (capcutRunning()) throw new Error('CapCut is running. Close it before saving, or pass force:true.');
     }
     const v = this.validate();
-    const cPath = path.join(this.dir, 'draft_content.json');
+    const cPath = this.contentPath;
     try { fs.copyFileSync(cPath, cPath + '.mcpbak'); } catch {}
     const tmp = cPath + '.tmp'; fs.writeFileSync(tmp, JSON.stringify(this.content)); fs.renameSync(tmp, cPath);
     if (this.meta) { try { fs.copyFileSync(this.metaPath, this.metaPath + '.mcpbak'); } catch {} const mt = this.metaPath + '.tmp'; fs.writeFileSync(mt, JSON.stringify(this.meta)); fs.renameSync(mt, this.metaPath); }
@@ -288,7 +337,7 @@ export class CapCutDraft {
 // clone a whole draft folder to a new name (valid scaffolding), optionally emptied
 export function cloneDraft(base, newName, { empty = false } = {}) {
   const src = path.join(DRAFTS_DIR, base), dst = path.join(DRAFTS_DIR, newName);
-  if (!fs.existsSync(path.join(src, 'draft_content.json'))) throw new Error(`base draft not found: ${base}`);
+  if (!contentPath(src)) throw new Error(`base draft not found: ${base}`);
   if (fs.existsSync(dst)) throw new Error(`draft already exists: ${newName}`);
   fs.mkdirSync(dst, { recursive: true });
   for (const fn of fs.readdirSync(src)) { const s = path.join(src, fn); try { if (fs.statSync(s).isFile()) fs.copyFileSync(s, path.join(dst, fn)); } catch {} }
@@ -297,7 +346,7 @@ export function cloneDraft(base, newName, { empty = false } = {}) {
     for (const k of Object.keys(d.content.materials)) if (Array.isArray(d.content.materials[k])) d.content.materials[k] = [];
     for (const tr of d.content.tracks) tr.segments = [];
     d.content.duration = 0; d.content.id = uid(); d.content.name = newName;
-    fs.writeFileSync(path.join(dst, 'draft_content.json'), JSON.stringify(d.content));
+    fs.writeFileSync(contentPath(dst), JSON.stringify(d.content));
   }
   return { created: newName, dir: dst };
 }
