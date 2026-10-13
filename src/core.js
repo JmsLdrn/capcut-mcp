@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execSync, execFileSync, spawnSync } from 'child_process';
 
 // ---- where the drafts live (override with CAPCUT_DRAFTS_DIR) ----
 const STD_WIN = path.join(os.homedir(), 'AppData/Local/CapCut/User Data/Projects/com.lveditor.draft');
@@ -25,13 +25,19 @@ const TEMPLATE_DRAFT = process.env.CAPCUT_TEMPLATE_DRAFT || '0723';
 const uid = () => crypto.randomUUID().toUpperCase();
 const clone = o => JSON.parse(JSON.stringify(o));
 const US = 1e6;
+// CapCut stores photo materials with this fixed source length (3 h); the segment sets the visible duration
+const PHOTO_MAT_DUR = 10800 * US;
 
+// ffprobe gets the path as a separate argv entry (no shell), always absolute so it can't be read as an option
+const ffprobe = (args, file) => execFileSync('ffprobe', ['-v', 'error', ...args, path.resolve(file)], { encoding: 'utf8' }).trim();
 function probeDur(file) {
-  try { return Math.round(parseFloat(execSync(`ffprobe -v error -show_entries format=duration -of default=nw=1:nk=1 "${file}"`).toString().trim()) * US); }
-  catch { return 5 * US; }
+  let s = NaN;
+  try { s = parseFloat(ffprobe(['-show_entries', 'format=duration', '-of', 'default=nw=1:nk=1'], file)); } catch {}
+  if (!Number.isFinite(s) || s <= 0) throw new Error(`could not read the duration of ${file} with ffprobe`);
+  return Math.round(s * US);
 }
 function probeWH(file) {
-  try { const [w, h] = execSync(`ffprobe -v error -select_streams v:0 -show_entries stream=width,height -of csv=p=0:s=x "${file}"`).toString().trim().split('x').map(Number); return { w: w || 1920, h: h || 1080 }; }
+  try { const [w, h] = ffprobe(['-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0:s=x'], file).split('x').map(Number); return { w: w || 1920, h: h || 1080 }; }
   catch { return { w: 1920, h: 1080 }; }
 }
 
@@ -71,6 +77,11 @@ export function listDrafts() {
 
 // is CapCut running? (writing while open gets clobbered by autosave)
 function capcutRunning() {
+  if (process.platform === 'darwin') {
+    // any process inside CapCut.app (main app or helpers); exit 1 = no match. Fails closed if pgrep itself errors.
+    const r = spawnSync('pgrep', ['-f', '/CapCut.app/Contents/']);
+    return r.status !== 1;
+  }
   if (process.platform !== 'win32') return false;
   try { return /CapCut\.exe/i.test(execSync('tasklist /FI "IMAGENAME eq CapCut.exe" /NH', { encoding: 'utf8' })); }
   catch { return false; }
@@ -143,10 +154,16 @@ export class CapCutDraft {
     const tplType = kind === 'image' ? (this.templates().image ? 'image' : 'video') : kind;
     const tpl = this.templates()[tplType] || this.templates().video;
     if (!tpl) throw new Error(`no ${kind} template available`);
-    const dur = opts.durUs != null ? opts.durUs : probeDur(file);
+    // real source length for video/audio (never the template's); images have none, so the caller must give one
+    if (kind === 'image' && opts.durUs == null) throw new Error('durSec is required for images');
+    const srcDur = kind === 'image' ? PHOTO_MAT_DUR : probeDur(file);
+    const srcStart = opts.srcStartUs || 0;
+    const dur = opts.durUs != null ? opts.durUs : srcDur - srcStart;
+    if (dur <= 0 || srcStart + dur > srcDur) throw new Error(`requested ${(srcStart + dur) / US}s of source, but ${path.basename(file)} is ${srcDur / US}s long`);
     const mat = clone(tpl.mat); mat.id = uid(); mat.path = file.replace(/\\/g, '/'); mat.material_name = path.basename(file); mat.type = type;
     if (kind !== 'audio') { const { w, h } = probeWH(file); mat.width = w; mat.height = h; }
-    mat.duration = kind === 'audio' ? probeDur(file) : (mat.duration || probeDur(file));
+    mat.duration = srcDur;
+    if (kind === 'image') mat.has_audio = false;
     ['local_material_id', 'origin_material_id', 'local_id', 'request_id', 'aigc_history_id', 'aigc_item_id'].forEach(k => { if (k in mat) mat[k] = ''; });
     const matKey = kind === 'audio' ? 'audios' : (kind === 'image' ? 'videos' : 'videos'); // CapCut stores images in videos[]
     this._mats(matKey).push(mat);
@@ -171,6 +188,9 @@ export class CapCutDraft {
   addText(text, opts = {}) {
     const tpl = this.templates().text;
     if (!tpl) throw new Error('no text template found. Set CAPCUT_TEMPLATE_DRAFT to a draft that contains a text layer.');
+    if (opts.fontPath && !fs.existsSync(opts.fontPath)) throw new Error(`font file not found: ${opts.fontPath}`);
+    // an explicit font file replaces the template's; its CapCut resource id is cleared so CapCut can't swap in its cached font
+    const font = opts.fontPath ? { path: opts.fontPath, id: '' } : null;
     const mat = clone(tpl.mat); mat.id = uid();
     try {
       const content = JSON.parse(mat.content);
@@ -180,8 +200,10 @@ export class CapCutDraft {
         if (opts.color) content.styles[0].fill = { content: { solid: { color: hexToRgb(opts.color) } } };
         if (opts.fontSize) content.styles[0].size = opts.fontSize;
       }
+      if (font) for (const st of content.styles || []) st.font = { ...font };
       mat.content = JSON.stringify(content);
-    } catch { mat.content = JSON.stringify({ text, styles: [{ range: [0, text.length], size: opts.fontSize || 15, fill: { content: { solid: { color: hexToRgb(opts.color || '#ffffff') } } } }] }); }
+    } catch { mat.content = JSON.stringify({ text, styles: [{ range: [0, text.length], size: opts.fontSize || 15, fill: { content: { solid: { color: hexToRgb(opts.color || '#ffffff') } } }, ...(font ? { font } : {}) }] }); }
+    if (font) Object.assign(mat, { font_path: font.path, font_id: '', font_resource_id: '', font_name: path.basename(font.path).replace(/\.[^.]+$/, '') });
     this._mats('texts').push(mat);
     const refs = tpl.refs.map(({ k, m }) => { const c = clone(m); c.id = uid(); this._mats(k).push(c); return c.id; });
     const seg = clone(tpl.seg); seg.id = uid(); seg.material_id = mat.id; seg.extra_material_refs = refs;
@@ -272,10 +294,9 @@ export class CapCutDraft {
 
   // ---------- save ----------
   save({ force = false } = {}) {
-    if (!force) {
-      if (fs.existsSync(path.join(this.dir, '.locked'))) throw new Error('draft is locked (open in CapCut). Close CapCut, or pass force:true. Autosave will overwrite edits made while open.');
-      if (capcutRunning()) throw new Error('CapCut is running. Close it before saving, or pass force:true.');
-    }
+    // a running CapCut autosaves over our write, so this check cannot be forced
+    if (capcutRunning()) throw new Error('CapCut is running. Quit it completely before saving (force does not override this).');
+    if (!force && fs.existsSync(path.join(this.dir, '.locked'))) throw new Error('draft is locked (open in CapCut). Close CapCut, or pass force:true. Autosave will overwrite edits made while open.');
     const v = this.validate();
     const cPath = path.join(this.dir, 'draft_content.json');
     try { fs.copyFileSync(cPath, cPath + '.mcpbak'); } catch {}

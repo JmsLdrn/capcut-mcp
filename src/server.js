@@ -44,8 +44,8 @@ s.tool('capcut_add_video', 'Add a video clip at a time on a track. Session edit;
   { draft: z.string(), file: z.string(), ...placeOpts },
   wrap(async (a) => get(a.draft).addVideo(a.file, optsFrom(a))));
 
-s.tool('capcut_add_image', 'Add an image at a time on a track.',
-  { draft: z.string(), file: z.string(), ...placeOpts },
+s.tool('capcut_add_image', 'Add an image at a time on a track. durSec is required (images have no length of their own).',
+  { draft: z.string(), file: z.string(), ...placeOpts, durSec: z.number().positive().describe('how long the image stays on screen, seconds (required)') },
   wrap(async (a) => get(a.draft).addImage(a.file, optsFrom(a))));
 
 s.tool('capcut_add_audio', 'Add an audio clip at a time on a track.',
@@ -55,8 +55,9 @@ s.tool('capcut_add_audio', 'Add an audio clip at a time on a track.',
 s.tool('capcut_add_text', 'Add a text overlay. Requires a text template (a draft with a text layer; see CAPCUT_TEMPLATE_DRAFT).',
   { draft: z.string(), text: z.string(), atSec: z.number(), durSec: z.number().optional(),
     fontSize: z.number().optional(), color: z.string().optional().describe('hex e.g. #ffffff'),
-    posX: z.number().optional(), posY: z.number().optional(), trackIndex: z.number().int().optional() },
-  wrap(async (a) => get(a.draft).addText(a.text, { atUs: sec(a.atSec), durUs: sec(a.durSec), fontSize: a.fontSize, color: a.color, posX: a.posX, posY: a.posY, trackIndex: a.trackIndex })));
+    posX: z.number().optional(), posY: z.number().optional(), trackIndex: z.number().int().optional(),
+    fontPath: z.string().optional().describe('absolute path to an installed .ttf/.otf; replaces the template font') },
+  wrap(async (a) => get(a.draft).addText(a.text, { atUs: sec(a.atSec), durUs: sec(a.durSec), fontSize: a.fontSize, color: a.color, posX: a.posX, posY: a.posY, trackIndex: a.trackIndex, fontPath: a.fontPath })));
 
 s.tool('capcut_add_track', 'Add a new track (video | audio | text | sticker).',
   { draft: z.string(), type: z.enum(['video', 'audio', 'text', 'sticker']).optional(), name: z.string().optional() },
@@ -89,7 +90,7 @@ s.tool('capcut_raw_patch', 'Advanced escape hatch: deep-merge a JSON patch into 
 s.tool('capcut_validate', 'Check the (in-session) draft for overlaps, duplicate ids/render_index, missing media.',
   { draft: z.string() }, wrap(async ({ draft }) => get(draft).validate()));
 
-s.tool('capcut_save', 'Write session edits to disk (backs up .mcpbak, validates). Refuses if CapCut is open unless force:true.',
+s.tool('capcut_save', 'Write session edits to disk (backs up .mcpbak, validates). Always refuses while CapCut is running; force only overrides a stale .locked file.',
   { draft: z.string(), force: z.boolean().optional() },
   wrap(async ({ draft, force }) => { const r = get(draft).save({ force: !!force }); open.delete(draft); return r; }));
 
