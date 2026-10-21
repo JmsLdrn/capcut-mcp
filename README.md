@@ -42,7 +42,7 @@ Leave the `env` values blank to auto-detect, or fill them in (see **Configure** 
 ## Workflow (important)
 1. **Close CapCut** on the draft you want to edit. CapCut autosaves on a timer; writing while it's open gets clobbered. `capcut_save` refuses if CapCut is running or the draft's `.locked` file is present (override with `force: true` only if you know it's safe).
 2. Edits are a **session**: `capcut_add_*` / `capcut_move_*` etc. accumulate in memory. Nothing hits disk until **`capcut_save`**.
-3. `capcut_save` writes `draft_content.json` (+ meta) **atomically** after making a `.mcpbak` backup, and runs `capcut_validate`.
+3. `capcut_save` writes `draft_content.json` (or `draft_info.json` on newer CapCut builds) (+ meta) **atomically** after making a `.mcpbak` backup, and runs `capcut_validate`.
 4. Reopen the draft in CapCut.
 
 All times at the tool boundary are in **seconds** (converted to CapCut's microseconds internally).
