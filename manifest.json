@@ -1,0 +1,202 @@
+{
+  "manifest_version": "0.3",
+  "name": "capcut-mcp",
+  "display_name": "CapCut – montaggio bozze",
+  "version": "0.3.0",
+  "description": "Claude legge e monta le bozze di CapCut desktop: premontaggio automatico, trascrizione offline, clip, testi, transizioni, file da Higgsfield.",
+  "long_description": "Collega Claude alle bozze di **CapCut desktop** sul tuo PC.\n\n- **Premontaggio**: trascrive il girato con Whisper (offline, sul PC), riconosce silenzi e frasi interrotte e ricostruisce la traccia principale tenendo tutte le prese complete.\n- **Montaggio**: aggiunge video, immagini, audio e testi; sposta, taglia, divide; copia transizioni e animazioni da clip che le hanno già.\n- **Media**: scarica i file generati (es. con Higgsfield), mostra fotogrammi a Claude, converte con ffmpeg.\n- **Sicurezza**: non salva mai con CapCut aperto, fa un backup a ogni salvataggio e permette di tornare indietro.\n\nLa prima volta chiedi a Claude di eseguire `capcut_setup`: installa ffmpeg e scarica il modello Whisper (circa 600 MB).",
+  "author": {
+    "name": "James Aldrin Boncales e collaboratori",
+    "url": "https://jmsldrn.com"
+  },
+  "license": "MIT",
+  "icon": "icon.png",
+  "keywords": [
+    "capcut",
+    "video",
+    "montaggio",
+    "whisper",
+    "premontaggio"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "src/server.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/src/server.js"
+      ],
+      "env": {
+        "CAPCUT_DRAFTS_DIR": "${user_config.drafts_dir}",
+        "CAPCUT_MEDIA_DIR": "${user_config.media_dir}",
+        "CAPCUT_TEMPLATE_DRAFT": "${user_config.template_draft}",
+        "CAPCUT_WHISPER_MODEL": "${user_config.whisper_model}",
+        "CAPCUT_LANGUAGE": "${user_config.language}"
+      }
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "win32"
+    ],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  },
+  "user_config": {
+    "drafts_dir": {
+      "type": "directory",
+      "title": "Cartella delle bozze CapCut (facoltativo)",
+      "description": "Lascia vuoto: viene trovata da sola. Serve solo se in CapCut hai spostato le bozze in un'altra cartella.",
+      "required": false
+    },
+    "media_dir": {
+      "type": "directory",
+      "title": "Cartella per i file scaricati (facoltativo)",
+      "description": "Dove salvare video e immagini scaricati, per esempio da Higgsfield. Se vuoto: Video\\CapCut MCP.",
+      "required": false
+    },
+    "template_draft": {
+      "type": "string",
+      "title": "Bozza modello per i testi (facoltativo)",
+      "description": "Nome di una bozza con un testo nello stile che vuoi per i sottotitoli. Se vuoto, Claude usa il primo testo che trova nelle tue bozze.",
+      "required": false
+    },
+    "whisper_model": {
+      "type": "string",
+      "title": "Modello di trascrizione",
+      "description": "large-v3-turbo-q5_0 (consigliato), medium-q5_0, small (PC lenti, meno preciso).",
+      "default": "large-v3-turbo-q5_0",
+      "required": false
+    },
+    "language": {
+      "type": "string",
+      "title": "Lingua del parlato",
+      "description": "Codice lingua per la trascrizione, es. it, en, es.",
+      "default": "it",
+      "required": false
+    }
+  },
+  "tools": [
+    {
+      "name": "capcut_setup",
+      "description": "Controlla cosa serve (ffmpeg, modello Whisper, cartella bozze)."
+    },
+    {
+      "name": "capcut_job_status",
+      "description": "Stato di un lavoro in background (setup, trascrizione, download, ffmpeg)."
+    },
+    {
+      "name": "capcut_list_drafts",
+      "description": "Elenca le bozze di CapCut (dalla piÃ¹ recente), con durata e se sono aperte."
+    },
+    {
+      "name": "capcut_read_timeline",
+      "description": "Legge una bozza: formato, fps, tracce e ogni segmento (id, file, tempi, testo, stili)."
+    },
+    {
+      "name": "capcut_clone_draft",
+      "description": "Duplica una bozza con un nuovo nome (e la registra in CapCut). empty:true la svuota per partire da zero con lo stesso formato."
+    },
+    {
+      "name": "capcut_add_video",
+      "description": "Aggiunge un video (o immagine) alla bozza in un punto della timeline."
+    },
+    {
+      "name": "capcut_add_image",
+      "description": "Aggiunge un'immagine (png/jpg) alla bozza."
+    },
+    {
+      "name": "capcut_add_audio",
+      "description": "Aggiunge un audio (musica, effetto, voce) alla bozza."
+    },
+    {
+      "name": "capcut_add_text",
+      "description": "Aggiunge un testo."
+    },
+    {
+      "name": "capcut_add_track",
+      "description": "Aggiunge una traccia vuota (video | audio | text | sticker)."
+    },
+    {
+      "name": "capcut_move_segment",
+      "description": "Sposta un segmento a un nuovo inizio ed eventualmente su un'altra traccia."
+    },
+    {
+      "name": "capcut_trim_segment",
+      "description": "Cambia inizio / durata / punto di ingresso nel file di un segmento (secondi)."
+    },
+    {
+      "name": "capcut_split_segment",
+      "description": "Taglia un segmento in due in un punto della timeline (secondi)."
+    },
+    {
+      "name": "capcut_delete_segment",
+      "description": "Elimina un segmento."
+    },
+    {
+      "name": "capcut_set_props",
+      "description": "Imposta posizione / scala / rotazione / opacitÃ  / volume / velocitÃ  / visibilitÃ  di un segmento."
+    },
+    {
+      "name": "capcut_rough_cut",
+      "description": "PREMONTAGGIO: ricostruisce la traccia video principale tenendo solo le parti indicate (tempi nel file sorgente, in ordine finale), una dopo l'altra."
+    },
+    {
+      "name": "capcut_style_library",
+      "description": "Elenca transizioni, animazioni ed effetti giÃ  usati in tutte le bozze, con il clip da cui copiarli (per capcut_apply_style)."
+    },
+    {
+      "name": "capcut_apply_style",
+      "description": "Copia transizioni / animazioni / effetti da un clip che li ha giÃ  (anche di un'altra bozza) su uno o piÃ¹ segmenti."
+    },
+    {
+      "name": "capcut_raw_patch",
+      "description": "Avanzato: unisce una patch JSON dentro draft_content (operazioni non documentate)."
+    },
+    {
+      "name": "capcut_validate",
+      "description": "Controlla la bozza (anche le modifiche non salvate): sovrapposizioni, id duplicati, file mancanti."
+    },
+    {
+      "name": "capcut_save",
+      "description": "Scrive le modifiche su disco (con backup automatico e aggiornando anche la copia in Timelines)."
+    },
+    {
+      "name": "capcut_discard",
+      "description": "Annulla le modifiche non salvate e ricarica la bozza dal disco."
+    },
+    {
+      "name": "capcut_list_backups",
+      "description": "Elenca i backup di una bozza (uno per ogni salvataggio)."
+    },
+    {
+      "name": "capcut_restore_backup",
+      "description": "Riporta una bozza a un backup (prima salva un backup dello stato attuale)."
+    },
+    {
+      "name": "capcut_list_files",
+      "description": "Sfoglia le cartelle del PC per trovare video, audio e immagini."
+    },
+    {
+      "name": "capcut_probe_media",
+      "description": "Informazioni su un file: durata, risoluzione (come si vede), fps, audio, trasparenza."
+    },
+    {
+      "name": "capcut_view_frames",
+      "description": "Mostra fotogrammi come immagini, per guardare il video."
+    },
+    {
+      "name": "capcut_transcribe",
+      "description": "Trascrive un video/audio a blocchi di parlato (Whisper, sul PC, offline)."
+    },
+    {
+      "name": "capcut_download",
+      "description": "Scarica un file da un URL (es. un video o un'immagine generati con Higgsfield) nella cartella media, per poi metterlo nella bozza."
+    },
+    {
+      "name": "capcut_ffmpeg",
+      "description": "Avanzato: esegue ffmpeg con gli argomenti dati (senza \"ffmpeg\" iniziale), es. per convertire, tagliare, togliere uno sfondo verde."
+    }
+  ]
+}

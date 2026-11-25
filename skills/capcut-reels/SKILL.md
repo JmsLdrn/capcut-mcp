@@ -1,72 +1,106 @@
 ---
 name: capcut-reels
 description: >-
-  Edit and assemble CapCut desktop drafts programmatically with Claude via the
-  capcut MCP server, and run the full short-video pipeline behind them: record →
-  captions (WhisperFlow) → motion graphics (HyperFrames) → probe/encode
-  (ffprobe/ffmpeg) → assemble, trim, split, caption a CapCut draft. Use when the
-  user wants to build, edit, re-cut, caption, or reorder a CapCut project (Reels,
-  Shorts, TikTok, YouTube, explainers) instead of doing it by hand in the app.
+  Edit CapCut desktop drafts through the capcut MCP (tools named capcut_*): rough-cut
+  talking-head recordings (premontaggio: drop silences and false starts, keep every
+  complete take), transcribe with Whisper offline, place clips / images / audio /
+  captions, copy CapCut transitions and animations, and drop in motion graphics or
+  b-roll generated elsewhere (e.g. Higgsfield). Use whenever the user mentions a
+  CapCut project, a "bozza", a premontaggio, reels/shorts/TikTok editing, or wants
+  generated media put into a CapCut timeline.
 ---
 
-# CapCut reels pipeline
+# CapCut editing with the capcut MCP
 
-This skill drives real CapCut desktop projects through the **capcut MCP** (tools named
-`mcp__capcut__*`) plus a small set of companion tools. It is the repeatable process behind a
-series of vertical real-estate reels; it generalizes to any short-form video assembled from
-clips + captions + motion graphics.
+Works in Claude Desktop (chat) with no shell: every file operation goes through a
+`capcut_*` tool. Users are often non-technical and Italian-speaking — explain in plain
+Italian, one step at a time, and never assume they know file paths.
 
-## Prerequisites
-- **capcut MCP** installed and connected (`claude mcp add capcut ...`). Tools appear as `mcp__capcut__*`.
-- **CapCut desktop** installed, with the drafts you want to edit saved locally.
-- **ffmpeg + ffprobe** on PATH (durations/resolutions; final encodes).
-- **HyperFrames** (optional) for motion-graphic overlays / full-screen animated scenes.
-- **WhisperFlow** (optional) for transcription → captions/subtitles.
+## Ground rules
+- **Edits live in memory until `capcut_save`.** Before saving, ask the user to close
+  CapCut completely (autosave would overwrite the edit). Don't pass `force` unless they
+  confirm CapCut is closed and the save still refuses.
+- **Every save makes a backup** (`capcut_list_backups`, `capcut_restore_backup`). Mention
+  this when the user is worried about breaking a project.
+- **Seconds everywhere.** Never pass microseconds.
+- **First run on a PC:** if a tool reports missing ffmpeg or Whisper model, run
+  `capcut_setup` with `install: true` and keep the user informed (one-time ~600 MB).
+- **Long jobs** (setup, transcription, downloads, ffmpeg) return a `jobId`; poll with
+  `capcut_job_status` (it waits up to 50 s per call). Transcription costs ~8–15 s per
+  spoken phrase: for long recordings tell the user the estimate and offer to continue
+  when they write back, instead of polling dozens of times.
+- **Finding files:** `capcut_list_files` (no args → common folders). To see footage,
+  use `capcut_view_frames` (by file, or by draft + timeline seconds).
 
-## The one rule that matters most
-**Close CapCut on the draft before saving.** CapCut autosaves on a timer and will clobber your
-edits. `capcut_save` refuses when CapCut is running or the draft's `.locked` file exists — do not
-`force` past that unless you are certain the app is closed. All times at the tool boundary are in
-**seconds**.
+## Premontaggio (rough cut of a talking-head recording)
+1. `capcut_list_drafts` → `capcut_read_timeline`. The main video track is the first
+   video track; note each source `path` on it.
+2. `capcut_transcribe` each source file. Output = numbered speech blocks
+   `[start–end]` in **source-file seconds**, each transcribed on its own (so repeated
+   takes are not merged), with a level in dB and hints: `▽ basso` (well under the main
+   voice), `↻ ripetuto più forte in #n` (same words said louder right after), `↳` (block
+   that starts quiet and ends at full voice, with the split time).
+3. Decide per block:
+   - **Keep every complete take** of a sentence, even if repeated 3–5 times — the user
+     picks the best one later. Never "choose the best take" yourself unless asked.
+   - **Dictated lines are not takes.** Often someone behind the camera reads each line
+     and the person on camera repeats it. Drop the dictated one and keep only what the
+     person on camera says. Typical sign: the same sentence twice in a row, the first
+     quieter (▽/↻); with `↳` keep only the loud part. **Always confirm with
+     `capcut_view_frames`** inside the block: a person who is still, with a closed mouth,
+     is listening (dictation); one who talks and gestures is doing a take. A line
+     whispered on purpose (hand by the mouth) is quiet but is a take. If the same words
+     appear twice inside one long block, check frames at several points and cut there.
+   - Drop: silence, takes interrupted mid-sentence (false starts), noises, off-script
+     remarks, swearing/asides.
+   - Very short blocks reading "Grazie a tutti", "Sottotitoli…", "[Musica]" are Whisper
+     hallucinations on noise — drop them.
+   - A complete but doubtful take (mumbled word, wrong word): keep it and list it.
+   - A take split across two adjacent blocks (pause mid-sentence) → keep both blocks.
+4. `capcut_rough_cut` with `keeps` in chronological order (`file` + `startSec` +
+   `endSec` straight from the blocks, `note` = first words). Each keep becomes its own
+   segment, end to end.
+5. Other tracks (titles, music, SFX from a reused template) are **not** moved — tell the
+   user they are now out of sync and offer to realign them later.
+6. `capcut_validate` → ask to close CapCut → `capcut_save` (with a `note`).
+7. Report: duration before/after, a table "timeline time | sentence | number of takes",
+   doubtful takes, how many dictated lines were dropped, and that the original is in the
+   backups.
 
-## Workflow
+## Captions and text
+- `capcut_add_text` clones the style (font, stroke, animation) of an existing text layer.
+  Set `CAPCUT_TEMPLATE_DRAFT` (extension settings) to the draft whose caption style
+  they want; otherwise the first text found in any draft is used.
+- For word-synced captions transcribe the *final* cut's source files and place one text
+  per block at its timeline position (block start − keep start + keep `atSec`).
 
-1. **Inspect.** `capcut_list_drafts` to find the draft; `capcut_read_timeline` to see canvas, fps,
-   tracks, and every segment (ids, media, start/duration in seconds, layer). Note the segment `id`s
-   you'll act on.
-2. **Start from a known-good base.** For a fresh build, `capcut_clone_draft` (optionally `empty:true`)
-   rather than authoring JSON from scratch — cloning is the only reliable way to get valid CapCut
-   structure. To edit in place, just operate on the existing draft.
-3. **Prepare media (companion tools, outside CapCut):**
-   - Motion graphics / animated scenes → **HyperFrames**, rendered to `.mp4` (or alpha `.mov`).
-   - Captions → **WhisperFlow** transcript; convert cue timings to seconds for `capcut_add_text`,
-     or burn them in HyperFrames if you want styled/animated captions.
-   - Use **ffprobe** to confirm each asset's duration before placing it so timings line up.
-4. **Assemble in the draft (session edits accumulate in memory):**
-   - `capcut_add_video` / `_image` / `_audio` — place media at `atSec` on a track.
-   - `capcut_add_text` — captions/titles (needs a text-template draft; see `CAPCUT_TEMPLATE_DRAFT`).
-   - `capcut_add_track` — separate layers for b-roll, captions, music.
-   - `capcut_move_segment` / `_trim_segment` / `_split_segment` / `_delete_segment` — re-cut and retime.
-   - `capcut_set_props` — scale, position, rotation, opacity, volume, speed, visibility.
-   - `capcut_raw_patch` — escape hatch for effects/transitions/rich text (inspect a template first;
-     these are best-effort and version-sensitive).
-5. **Validate, then save.** `capcut_validate` (overlaps, duplicate ids, missing media) → fix anything
-   flagged → **close CapCut** → `capcut_save` (writes a `.mcpbak` backup, atomic write, re-validates).
-   Use `capcut_discard` to drop an unsaved session.
-6. **Reopen in CapCut** to review, then export from the app (or encode the assembled pieces with ffmpeg).
+## Motion graphics, b-roll, generated media (Higgsfield etc.)
+- Generated assets come back as URLs → `capcut_download` (saves to the media folder,
+  returns path + probe info) → `capcut_add_video` / `capcut_add_image` at the right time.
+  Omit `trackIndex` to land on a free overlay track above the main video; use
+  `volume: 0` for silent overlays.
+- Check `hasAlpha` in the probe: an overlay without transparency covers the speaker. If
+  the generator gave a solid background, suggest a version with a flat green/magenta
+  background and CapCut's Chroma key, or use it full-screen as a cutaway.
+- Use `capcut_view_frames` on the draft to pick moments/positions that don't cover the
+  face or the product.
 
-## Tips & gotchas
-- **Seconds in, seconds out.** The MCP converts to CapCut's microseconds internally — never pass µs.
-- **Layer order** is `render_index` / `track_render_index`: higher = on top. Captions and overlays go
-  above b-roll.
-- **Keep the `.mcpbak` backups.** CapCut's format changes between versions; a bad edit is recoverable
-  from the backup.
-- **`add_text` failing?** The default template draft won't exist on a new machine — set
-  `CAPCUT_TEMPLATE_DRAFT` to one of your own drafts that contains a text layer.
-- **Narration vs visuals mismatch** is normal when scenes are re-cut faster than the voiceover; keep
-  narration on its own audio track and trim/speed it to match.
+## CapCut transitions, animations, effects
+- You cannot invent CapCut effects; you can **copy** ones already used. `capcut_style_library`
+  lists every transition / animation / effect in the user's drafts with a source clip;
+  `capcut_apply_style` copies it onto target segments (animations are re-timed to the
+  target's length). If the effect they want isn't there, ask them to apply it once by hand
+  in any draft, then copy it everywhere.
+- Reliable "punch-in" zoom on cuts: `capcut_set_props` with `scale` 1.1–1.2 on alternate
+  segments.
 
-## What this skill does NOT do
-- It doesn't render the final export (do that in CapCut, or with ffmpeg on the assembled clips).
-- Effects, transitions, animations, and rich-text styling are **best-effort** via `capcut_raw_patch`.
-- It doesn't manage the media files themselves — point tools at real files that exist on disk.
+## Other tools
+- `capcut_clone_draft` (CapCut must be closed): try risky edits on a copy.
+- `capcut_ffmpeg`: conversions, trims, extracting audio, making a chroma-key version.
+- `capcut_raw_patch`: last resort for undocumented JSON; inspect a real example first.
+
+## Limits to state honestly
+- The CapCut draft format is undocumented; after big edits ask the user to open the
+  draft and check it. Backups make every change reversible.
+- No final export: the user exports from CapCut.
+- Windows only for automatic setup.

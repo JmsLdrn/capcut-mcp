@@ -6,14 +6,26 @@ An MCP server that lets Claude **read and edit CapCut desktop draft projects** �
 >
 > **Not affiliated with CapCut or ByteDance.** CapCut's draft format is proprietary and undocumented; this tool reads/writes it defensively (clone-from-template, backups, validation), but a CapCut update can shift the schema. **Keep the backups it makes.**
 
-## Requirements
+## Easiest: Claude Desktop extension (no terminal, no VS Code)
+1. Install **Claude Desktop** and sign in.
+2. Double-click **`capcut-mcp.mcpb`** (or Settings → Extensions → Advanced settings → Install Extension). Leave the optional fields empty unless your drafts live in a custom folder.
+3. (Optional) Upload **`capcut-reels-skill.zip`** in Customize → Skills.
+4. In a new chat, ask: *"esegui capcut_setup con install true"*. First time only: installs ffmpeg via winget and downloads the Whisper model (~600 MB) to `%LOCALAPPDATA%\capcut-mcp`.
+
+Build both files with `npm install && npm run bundle` → `dist/`. Windows only for now (automatic setup uses winget).
+
+## Requirements (manual / Claude Code setup)
 - **Node 18+**
-- **ffmpeg/ffprobe** on PATH (used to read media duration/resolution)
+- **ffmpeg/ffprobe** — the full build with the `whisper` filter for transcription (`winget install Gyan.FFmpeg`); `capcut_setup` can install it
 - **CapCut desktop** (Windows layout assumed; macOS path is auto-detected too)
 
 ## Configure (env, optional)
 - `CAPCUT_DRAFTS_DIR` — your CapCut Drafts folder. Auto-detects the standard `%LOCALAPPDATA%\CapCut\...` (Windows) / `~/Movies/CapCut/...` (macOS) locations; **set this if your drafts live elsewhere** (e.g. a different drive).
-- `CAPCUT_TEMPLATE_DRAFT` — name of a draft that contains video **and text** layers, used to harvest templates when the draft you're editing lacks one. **Default `0723` is the author's own draft and won't exist on your machine** — set this to one of *your* drafts that has a text layer, or the `capcut_add_text` tool won't work. (Everything else works without it.)
+- `CAPCUT_TEMPLATE_DRAFT` — a draft whose text layer style should be used for new captions. If unset, the first text layer found in any draft is used.
+- `CAPCUT_MEDIA_DIR` — where `capcut_download` saves files (default `Videos\CapCut MCP`).
+- `CAPCUT_WHISPER_MODEL` — `large-v3-turbo-q5_0` (default), `medium-q5_0`, `small`, `base`, `large-v3-turbo`.
+- `CAPCUT_LANGUAGE` — transcription language (default `it`).
+- `CAPCUT_FFMPEG_DIR` — use a specific ffmpeg build.
 
 ## Install
 ```bash
@@ -42,7 +54,7 @@ Leave the `env` values blank to auto-detect, or fill them in (see **Configure** 
 ## Workflow (important)
 1. **Close CapCut** on the draft you want to edit. CapCut autosaves on a timer; writing while it's open gets clobbered. `capcut_save` refuses if CapCut is running or the draft's `.locked` file is present (override with `force: true` only if you know it's safe).
 2. Edits are a **session**: `capcut_add_*` / `capcut_move_*` etc. accumulate in memory. Nothing hits disk until **`capcut_save`**.
-3. `capcut_save` writes `draft_content.json` (+ meta) **atomically** after making a `.mcpbak` backup, and runs `capcut_validate`.
+3. `capcut_save` validates, backs up the current files to `%LOCALAPPDATA%\capcut-mcp\backups\<draft>\<timestamp>` (last 25 kept; restore with `capcut_restore_backup`), writes `draft_content.json` **atomically**, and mirrors it into CapCut's per-timeline copy `Timelines/<id>/draft_content.json` (newer CapCut versions keep both).
 4. Reopen the draft in CapCut.
 
 All times at the tool boundary are in **seconds** (converted to CapCut's microseconds internally).
@@ -61,16 +73,23 @@ All times at the tool boundary are in **seconds** (converted to CapCut's microse
 | `capcut_split_segment` | split at a time |
 | `capcut_delete_segment` | remove |
 | `capcut_set_props` | scale / position / rotation / opacity / volume / speed / visibility |
+| `capcut_rough_cut` | rebuild the main track from a keep-list (source-file seconds): one segment per take |
+| `capcut_transcribe` | offline Whisper per speech block (ffmpeg `whisper` filter + Silero VAD); repeated takes stay separate; per-block level flags lines dictated from behind the camera |
+| `capcut_style_library` / `capcut_apply_style` | find transitions/animations/effects used in any draft and copy them onto segments |
 | `capcut_raw_patch` | advanced deep-merge escape hatch for undocumented ops |
-| `capcut_validate` | overlaps, duplicate ids, missing media |
-| `capcut_save` / `capcut_discard` | persist / drop the session |
+| `capcut_validate` | overlaps, dangling materials, missing media |
+| `capcut_save` / `capcut_discard` | persist (backup + Timelines mirror) / drop the session |
+| `capcut_list_backups` / `capcut_restore_backup` | undo a save |
+| `capcut_list_files` / `capcut_probe_media` / `capcut_view_frames` | browse folders, inspect media, show frames to Claude |
+| `capcut_download` / `capcut_ffmpeg` | fetch generated media (e.g. Higgsfield URLs), run ffmpeg |
+| `capcut_setup` / `capcut_job_status` | one-time install (ffmpeg + model); poll background jobs |
 
 ## Companion skill
 A Claude **skill** ships in [`skills/capcut-reels/`](skills/capcut-reels/SKILL.md). It teaches Claude the full production pipeline these tools were built for — record → captions (WhisperFlow) → motion graphics (HyperFrames) → probe/render (ffprobe/ffmpeg) → assemble & caption the CapCut draft via this MCP. Copy the `capcut-reels` folder into your Claude skills directory to install it.
 
 ## Guardrails
 - Won't save while CapCut is open (autosave clobber protection).
-- `.mcpbak` backup + atomic temp-then-rename write.
+- Timestamped backup on every save (outside the CapCut folder) + atomic temp-then-rename write; one-call restore.
 - Post-edit validation (overlaps, duplicate material ids, layer-order clashes, missing media).
 - New drafts are **cloned from a known-good base**, never built from an empty object.
 
@@ -80,8 +99,10 @@ A Claude **skill** ships in [`skills/capcut-reels/`](skills/capcut-reels/SKILL.m
 - `capcut_add_text` needs a draft with a text layer to harvest from (`CAPCUT_TEMPLATE_DRAFT`).
 
 ## Architecture
-- `src/core.js` — pure engine (`CapCutDraft` class + `cloneDraft`/`listDrafts`). Testable without MCP.
-- `src/server.js` — thin MCP stdio server; declares the tools and calls the core.
+- `src/core.js` — pure engine (`CapCutDraft` class + `cloneDraft`/`listDrafts`/backups/styles). Testable without MCP.
+- `src/media.js` — ffmpeg discovery, probing, frames, speech blocks, Whisper, downloads, setup, background jobs.
+- `src/server.js` — thin MCP stdio server; declares the tools and the workflow instructions sent to the client.
+- `manifest.json` + `scripts/build-bundle.mjs` — Claude Desktop extension (`.mcpb`) and skill zip.
 
 ## License & credits
 MIT © 2026 [James Aldrin Boncales](https://jmsldrn.com). Contributions and issues welcome. If this saves you time, a link back to [jmsldrn.com](https://jmsldrn.com) is appreciated — not required.

@@ -7,3 +7,6 @@ Thumbs.db
 *.mcpbak
 *.tmp
 *.locked
+
+# build output
+dist/

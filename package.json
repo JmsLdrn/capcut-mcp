@@ -1,16 +1,17 @@
 {
   "name": "capcut-mcp",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "MCP server that lets Claude read and edit CapCut desktop draft projects.",
   "type": "module",
   "bin": {
     "capcut-mcp": "src/server.js"
   },
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "bundle": "node scripts/build-bundle.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "zod": "^4.4.3"
   }
 }

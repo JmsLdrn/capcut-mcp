@@ -1,0 +1,8 @@
+# anchored with "/" so node_modules/**/dist etc. stay in the bundle
+/dist/
+/scripts/
+/skills/
+/backup/
+/mcp.json.example
+*.mcpbak
+*.tmp
